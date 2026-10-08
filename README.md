@@ -11,3 +11,5 @@ python scripts/run_conformance.py
 ```
 
 Do not pass a PAT. `mint apply` is not part of this integration.
+Release Please owns prerelease tags. PyPI publish is OIDC only; there is
+no PyPI token and no `latest` alias.

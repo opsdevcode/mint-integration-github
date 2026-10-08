@@ -1,0 +1,174 @@
+name: Publish integration release
+
+# A merged Release Please PR creates the tag and GitHub prerelease. This
+# workflow publishes exactly that immutable release. It never calculates or
+# pushes a version, tag, stable release, or latest alias.
+
+on:
+  release:
+    types:
+      - published
+
+permissions: {}
+
+concurrency:
+  group: publish-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event.release.prerelease == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      pep440: ${{ steps.rel.outputs.pep440 }}
+      tag: ${{ steps.rel.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - id: rel
+        name: Validate Release Please tag and version
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.release.tag_name }}"
+          if [[ ! "${TAG}" =~ ^v0\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
+            echo "refuse non-alpha or 1.x release tag ${TAG}"
+            exit 1
+          fi
+          SEMVER="${TAG#v}"
+          PYPROJECT_VERSION="$(python -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          if [[ "${PYPROJECT_VERSION}" != "${SEMVER}" ]]; then
+            echo "release tag ${TAG} must match pyproject.toml ${PYPROJECT_VERSION}"
+            exit 1
+          fi
+          PEP440="${SEMVER/-alpha./a}"
+          echo "pep440=${PEP440}" >>"${GITHUB_OUTPUT}"
+          echo "tag=${TAG}" >>"${GITHUB_OUTPUT}"
+
+      - name: Quality
+        run: |
+          pip install --no-cache-dir -e ".[dev]"
+          python scripts/run_conformance.py
+          python -m pytest -q --strict-markers
+
+      - name: Build Python dist once
+        run: |
+          set -euo pipefail
+          python -m pip install --no-cache-dir "build==1.2.2"
+          python -m build --sdist --wheel --outdir dist
+          test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l | tr -d ' ')" = 1
+          test "$(find dist -maxdepth 1 -name '*.whl' | wc -l | tr -d ' ')" = 1
+
+      - name: Test exact artifacts in isolated Python 3.12 venvs
+        env:
+          PEP440: ${{ steps.rel.outputs.pep440 }}
+        run: |
+          set -euo pipefail
+          smoke() {
+            local artifact="$1"
+            local root
+            root="$(mktemp -d)"
+            python -m venv "${root}/venv"
+            "${root}/venv/bin/python" -m pip install --no-cache-dir --upgrade pip
+            "${root}/venv/bin/python" -m pip install --no-cache-dir "${artifact}"
+            "${root}/venv/bin/python" -c "from importlib.metadata import version; assert version('mint-integration-github') == '${PEP440}', version('mint-integration-github')"
+            "${root}/venv/bin/python" -c "from implementation.reference_server import EXECUTION_SUPPORT, IDENTITY; assert IDENTITY == 'repo.github.plan'; assert EXECUTION_SUPPORT == 'fake'"
+            test -x "${root}/venv/bin/mint-integration-github"
+            rm -rf "${root}"
+          }
+          smoke "$(find dist -maxdepth 1 -name '*.tar.gz')"
+          smoke "$(find dist -maxdepth 1 -name '*.whl')"
+
+      - name: SHA-256 checksums
+        run: |
+          cd dist
+          sha256sum ./*.tar.gz ./*.whl > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: dist
+          format: spdx-json
+          artifact-name: mint-integration-github.spdx.json
+          output-file: dist/mint-integration-github.spdx.json
+          upload-artifact: true
+          upload-release-assets: false
+
+      - name: Upload once-built artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mint-integration-github-dist
+          path: dist/**
+          if-no-files-found: error
+          retention-days: 14
+
+  github-assets:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mint-integration-github-dist
+          path: dist
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@db473fddc028af60658334401dc6fa3ffd8669fd # v2.3.0
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.whl
+
+      - name: Attach immutable assets to existing prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          test "$(gh release view "${TAG}" --json isPrerelease --jq .isPrerelease)" = true
+          for asset in dist/*; do
+            name="$(basename "${asset}")"
+            id="$(gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq ".assets[] | select(.name == \"${name}\") | .id")"
+            if [[ -n "${id}" ]]; then
+              gh api -H "Accept: application/octet-stream" "/repos/${GITHUB_REPOSITORY}/releases/assets/${id}" >"/tmp/${name}"
+              cmp "${asset}" "/tmp/${name}" || { echo "existing ${name} differs"; exit 1; }
+              continue
+            fi
+            gh release upload "${TAG}" "${asset}"
+          done
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: mint-integration-github-dist
+          path: dist
+
+      - name: Isolate the same tested wheel and sdist
+        run: |
+          mkdir -p pypi-dist
+          cp dist/*.whl dist/*.tar.gz pypi-dist/
+
+      - name: Publish the same tested bytes to PyPI via OIDC
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
+        with:
+          packages-dir: pypi-dist
+          skip-existing: false
+          verbose: true
