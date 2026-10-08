@@ -1,0 +1,52 @@
+{
+  "artifact": {
+    "digest": "sha256:64a4c9d43fd003c4c8e4760429ce64f1430ddd865ded0433576476f84b384762",
+    "identity": "repo.github.plan/0.1.0"
+  },
+  "capabilities": [
+    {
+      "id": "repo.settings",
+      "version": "v1alpha1"
+    }
+  ],
+  "compatibility": {
+    "adapterId": "repo.github",
+    "adapterSchema": "mint.adapter/v0",
+    "adapterVersion": "v1alpha1",
+    "notes": "lossless plan-only mapping; snapshot in, no GitHub I/O"
+  },
+  "configurationSchemas": [],
+  "deprecation": {
+    "deprecated": false,
+    "eligibleRemoval": "",
+    "successor": ""
+  },
+  "executionSupport": "fake",
+  "identity": "repo.github.plan",
+  "implementation": {
+    "executable": "mint-integration-github",
+    "runtime": "python3.12"
+  },
+  "name": "plan",
+  "namespace": "repo.github",
+  "permissions": [],
+  "phases": [
+    "describe",
+    "evidence",
+    "observe",
+    "plan",
+    "validate",
+    "verify"
+  ],
+  "protocolVersions": [
+    "mint.protocol/v0"
+  ],
+  "provenance": {
+    "deterministic": true
+  },
+  "schema": "mint.integration/v0",
+  "targetKinds": [
+    "repo.github"
+  ],
+  "version": "0.1.0"
+}

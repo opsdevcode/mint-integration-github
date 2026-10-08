@@ -1,0 +1,24 @@
+{
+  "capability": {
+    "id": "repo.settings",
+    "version": "v1alpha1"
+  },
+  "snapshot": {
+    "schema": "mint.repository-snapshot/v0",
+    "kind": "MintRepositorySnapshot",
+    "providerKind": "repo.github",
+    "identity": {
+      "owner": "example",
+      "name": "demo"
+    },
+    "settings": {
+      "visibility": "public",
+      "defaultBranch": "main"
+    },
+    "source": "declared-fixture"
+  },
+  "target": {
+    "id": "example/demo",
+    "kind": "repo.github"
+  }
+}
