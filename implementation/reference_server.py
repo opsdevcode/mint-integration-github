@@ -19,8 +19,12 @@ IDENTITY = "repo.github.plan"
 VERSION = "0.1.0"
 CAPABILITY = "repo.settings"
 CAPABILITY_VERSION = "v1alpha1"
+SNAPSHOT_SCHEMA = "mint.repository-snapshot/v0"
 SUPPORTED = ("describe", "evidence", "observe", "plan", "validate", "verify")
 EXECUTION_SUPPORT = "fake"
+DESIRED_VISIBILITY = "private"
+DESIRED_DEFAULT_BRANCH = "main"
+DESIRED_REVIEWS = 1
 _SECRET_KEYS = frozenset(
     {
         "access_key",
@@ -77,13 +81,13 @@ def manifest_document() -> dict[str, Any]:
             "adapterId": "repo.github",
             "adapterSchema": "mint.adapter/v0",
             "adapterVersion": CAPABILITY_VERSION,
-            "notes": "lossless plan-only mapping",
+            "notes": "lossless plan-only mapping; snapshot in, no GitHub I/O",
         },
         "configurationSchemas": [],
         "deprecation": {"deprecated": False, "eligibleRemoval": "", "successor": ""},
         "executionSupport": EXECUTION_SUPPORT,
         "identity": IDENTITY,
-        "implementation": {"executable": "mint-integration-local", "runtime": "python3.12"},
+        "implementation": {"executable": "mint-integration-github", "runtime": "python3.12"},
         "name": "plan",
         "namespace": "repo.github",
         "permissions": [],
@@ -96,19 +100,66 @@ def manifest_document() -> dict[str, Any]:
     }
 
 
+def _snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    raw = payload.get("snapshot")
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, dict):
+        raise ProtocolError("MINT_SNAPSHOT", "snapshot must be an object")
+    schema = str(raw.get("schema", SNAPSHOT_SCHEMA))
+    if schema != SNAPSHOT_SCHEMA:
+        raise ProtocolError("MINT_SNAPSHOT", f"unsupported snapshot schema {schema}")
+    identity = raw.get("identity") if isinstance(raw.get("identity"), dict) else {}
+    settings = raw.get("settings") if isinstance(raw.get("settings"), dict) else {}
+    protection = (
+        raw.get("branchProtection") if isinstance(raw.get("branchProtection"), dict) else {}
+    )
+    security = raw.get("security") if isinstance(raw.get("security"), dict) else {}
+    return {
+        "defaultBranch": str(settings.get("defaultBranch", "")),
+        "description": str(settings.get("description", "")),
+        "dismissStaleReviews": bool(protection.get("dismissStaleReviews", False)),
+        "name": str(identity.get("name", "")),
+        "owner": str(identity.get("owner", "")),
+        "requiredReviews": int(protection.get("requiredReviews", 0) or 0),
+        "requireStatusChecks": bool(protection.get("requireStatusChecks", False)),
+        "secretScanning": bool(security.get("secretScanning", False)),
+        "source": str(raw.get("source", "")),
+        "visibility": str(settings.get("visibility", "")),
+        "vulnerabilityAlerts": bool(security.get("vulnerabilityAlerts", False)),
+    }
+
+
+def _operation(target_id: str, action: str, desired: dict[str, Any]) -> dict[str, Any]:
+    operation: dict[str, Any] = {
+        "action": action,
+        "desired": desired,
+        "logicalName": f"repo/{target_id}/{action}",
+        "schema": SCHEMA_OPERATION,
+        "status": "planned",
+        "targetId": target_id,
+    }
+    operation["operationId"] = _digest(
+        {key: value for key, value in operation.items() if key != "operationId"}
+    )
+    return operation
+
+
 def _observation(payload: dict[str, Any]) -> dict[str, Any]:
     target = payload.get("target")
     capability = payload.get("capability")
     if not isinstance(target, dict) or not isinstance(capability, dict):
         raise ProtocolError("MINT_PROTOCOL", "observe requires target and capability")
+    snapshot = _snapshot(payload)
     body: dict[str, Any] = {
         "capability": {
             "id": str(capability.get("id", "")),
             "version": str(capability.get("version", "")),
         },
-        "condition": "unknown",
+        "condition": "drift" if snapshot.get("visibility") != DESIRED_VISIBILITY else "aligned",
         "schema": SCHEMA_OBSERVATION,
-        "source": "declared-request",
+        "snapshot": snapshot,
+        "source": snapshot.get("source") or "declared-request",
         "target": {"id": str(target.get("id", "")), "kind": str(target.get("kind", ""))},
     }
     body["digest"] = _digest({key: value for key, value in body.items() if key != "digest"})
@@ -125,21 +176,55 @@ def _plan(payload: dict[str, Any]) -> dict[str, Any]:
             "MINT_CAPABILITY", f"unsupported target kind {kind}", kind="unsupported"
         )
     target_id = str(target.get("id", ""))
-    operation: dict[str, Any] = {
-        "action": "settings.update",
-        "desired": {"visibility": "private"},
-        "logicalName": f"repo/{target_id}/settings",
-        "schema": SCHEMA_OPERATION,
-        "status": "planned",
-        "targetId": target_id,
-    }
-    operation["operationId"] = _digest(
-        {key: value for key, value in operation.items() if key != "operationId"}
-    )
+    snapshot = _snapshot(payload)
+    operations: list[dict[str, Any]] = []
+    if snapshot.get("visibility") != DESIRED_VISIBILITY or snapshot.get("defaultBranch") != (
+        DESIRED_DEFAULT_BRANCH
+    ):
+        operations.append(
+            _operation(
+                target_id,
+                "settings.update",
+                {
+                    "defaultBranch": DESIRED_DEFAULT_BRANCH,
+                    "description": snapshot.get("description", ""),
+                    "visibility": DESIRED_VISIBILITY,
+                },
+            )
+        )
+    if (
+        snapshot.get("requiredReviews", 0) < DESIRED_REVIEWS
+        or not snapshot.get("requireStatusChecks")
+        or not snapshot.get("dismissStaleReviews")
+    ):
+        operations.append(
+            _operation(
+                target_id,
+                "branch_protection.update",
+                {
+                    "dismissStaleReviews": True,
+                    "requiredReviews": DESIRED_REVIEWS,
+                    "requireStatusChecks": True,
+                },
+            )
+        )
+    if not snapshot.get("secretScanning") or not snapshot.get("vulnerabilityAlerts"):
+        operations.append(
+            _operation(
+                target_id,
+                "security.update",
+                {"secretScanning": True, "vulnerabilityAlerts": True},
+            )
+        )
+    if not operations:
+        operations.append(
+            _operation(target_id, "settings.update", {"visibility": DESIRED_VISIBILITY})
+        )
     return {
         "observationDigest": str(payload.get("observationDigest", "")),
-        "operations": [operation],
+        "operations": operations,
         "schema": "mint.integration-plan/v0",
+        "snapshot": snapshot,
     }
 
 

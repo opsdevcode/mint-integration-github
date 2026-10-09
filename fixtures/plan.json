@@ -10,7 +10,17 @@
     },
     "settings": {
       "visibility": "public",
-      "defaultBranch": "main"
+      "defaultBranch": "main",
+      "description": "demo"
+    },
+    "branchProtection": {
+      "dismissStaleReviews": false,
+      "requiredReviews": 0,
+      "requireStatusChecks": false
+    },
+    "security": {
+      "secretScanning": false,
+      "vulnerabilityAlerts": false
     },
     "source": "declared-fixture"
   },
