@@ -30,3 +30,5 @@ Tagged `mint-integration.json` digest
 
 Do not pass a PAT. `mint apply` is not part of this integration.
 Release Please owns prerelease tags. Public preview, not 1.0.
+
+GitHub Releases are canonical (`opsdevcode.release/v0`). PyPI publication stays deferred.
