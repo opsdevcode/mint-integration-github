@@ -22,3 +22,30 @@ jobs:
         run: python scripts/run_conformance.py
       - name: Tests
         run: python -m pytest -q --strict-markers
+
+  github-assets:
+    name: GitHub Release assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Download and verify immutable release
+        run: |
+          set -euo pipefail
+          TAG=v0.2.0-alpha.1
+          WHEEL=mint_integration_github-0.2.0a1-py3-none-any.whl
+          EXPECTED=3c864b4f5e7298a0a2f52d0680cb5c3eb8ea57a8195e7d9ba628fe3b7b6e60da
+          mkdir -p /tmp/mint-github-assets
+          cd /tmp/mint-github-assets
+          curl -fsSL -O "https://github.com/opsdevcode/mint-integration-github/releases/download/${TAG}/SHA256SUMS"
+          awk '{print $2}' SHA256SUMS | sed 's|^\./||' | while read -r file; do
+            curl -fsSL -O "https://github.com/opsdevcode/mint-integration-github/releases/download/${TAG}/${file}"
+          done
+          shasum -a 256 -c SHA256SUMS
+          actual=$(shasum -a 256 "${WHEEL}" | awk '{print $1}')
+          test "${actual}" = "${EXPECTED}"
+          python -m venv /tmp/mint-github-wheel
+          /tmp/mint-github-wheel/bin/pip install --no-cache-dir --no-index "./${WHEEL}"
+          /tmp/mint-github-wheel/bin/python -c "from importlib.metadata import version; assert version('mint-integration-github') == '0.2.0a1'"
